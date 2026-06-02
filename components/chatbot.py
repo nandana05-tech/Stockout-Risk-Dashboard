@@ -56,16 +56,67 @@ def _build_context(latest_df: pd.DataFrame, filtered_df: pd.DataFrame) -> str:
         lines.append("\nRisiko per Kategori (prediksi model):")
         lines.append(cat_summary.to_string())
 
-    # Top 10 SKU berisiko tertinggi
+    # Top 10 SKU berisiko tertinggi — risk_score TIDAK disertakan agar AI tidak mengutipnya
     if "risk_score" in latest_df.columns:
-        cols = ["sku_id", "store_id", "category", "risk_level", "risk_score", "stock_on_hand"]
+        cols = ["sku_id", "store_id", "category", "risk_level", "stock_on_hand"]
         cols += [c for c in ["sku_name", "rolling_7d_sales"] if c in latest_df.columns]
-        lines.append("\n10 SKU Risiko Tertinggi Saat Ini:")
+        lines.append("\n10 SKU Risiko Tertinggi Saat Ini (risk_level: High/Medium/Low):")
         lines.append(latest_df.nlargest(10, "risk_score")[cols].to_string(index=False))
+
+    # Detail semua SKU per toko — untuk menjawab pertanyaan "di store mana saja?"
+    if "store_id" in latest_df.columns and "risk_level" in latest_df.columns:
+        store_cols = ["sku_id", "store_id", "risk_level", "stock_on_hand"]
+        store_cols += [c for c in ["sku_name", "category", "rolling_7d_sales"] if c in latest_df.columns]
+        lines.append("\nDetail SKU per Toko (kondisi terkini dari model):")
+        lines.append(latest_df[store_cols].sort_values(["sku_id", "store_id"]).to_string(index=False))
+
+    # ── Ringkasan per kategori dari data model ───────────────────────────────
+    if "category" in latest_df.columns and "risk_level" in latest_df.columns:
+        cat_risk = (
+            latest_df.groupby("category", observed=True)["risk_level"]
+            .value_counts().unstack(fill_value=0)
+            .reindex(columns=["High", "Medium", "Low"], fill_value=0)
+        )
+        cat_risk["Total_SKU"] = cat_risk.sum(axis=1)
+        lines.append("\nJumlah SKU per Kategori berdasarkan Risk Level:")
+        lines.append(cat_risk.to_string())
 
     # ── Analisis historis dari data asli ────────────────────────────────────
     if "stock_out_flag" in filtered_df.columns:
         grp_cols = ["sku_id"] + (["sku_name"] if "sku_name" in filtered_df.columns else [])
+
+        # Total stockout per kategori (untuk pertanyaan level kategori)
+        if "category" in filtered_df.columns:
+            cat_stockout = (
+                filtered_df.groupby("category", observed=True)["stock_out_flag"]
+                .agg(total_stockout_days="sum", total_records="count")
+                .assign(pct_hari=lambda x: (x["total_stockout_days"] / x["total_records"] * 100).round(1))
+                .sort_values("total_stockout_days", ascending=False)
+            )
+            lines.append("\nTotal Hari Stockout per Kategori (semua periode):")
+            lines.append(cat_stockout.to_string())
+
+        # Stockout per SKU per tahun (agar AI tidak perlu menghitung manual)
+        if "year" in filtered_df.columns:
+            sku_yr = (
+                filtered_df.groupby(grp_cols + ["year"], observed=True)["stock_out_flag"]
+                .sum().reset_index()
+                .rename(columns={"stock_out_flag": "stockout_days"})
+            )
+            lines.append("\nStockout per SKU per Tahun (hari):")
+            lines.append(sku_yr.to_string(index=False))
+
+        # Stockout per SKU per Toko per Tahun — untuk pertanyaan detail per store
+        if "store_id" in filtered_df.columns and "year" in filtered_df.columns:
+            store_grp = ["sku_id", "store_id"] + (["sku_name"] if "sku_name" in filtered_df.columns else []) + ["year"]
+            sku_store_yr = (
+                filtered_df.groupby(store_grp, observed=True)["stock_out_flag"]
+                .sum().reset_index()
+                .rename(columns={"stock_out_flag": "stockout_days"})
+                .sort_values(["sku_id", "store_id", "year"])
+            )
+            lines.append("\nStockout per SKU per Toko per Tahun (hari):")
+            lines.append(sku_store_yr.to_string(index=False))
 
         # Total hari stockout per SKU (semua periode) — tanpa copy()
         sku_total = (
@@ -150,16 +201,37 @@ def _stream_openai(api_key: str, history: list, context: str):
         "(Fast-Moving Consumer Goods). Tugasmu membantu pengguna memahami "
         "risiko stockout, menganalisis data stok, dan memberikan rekomendasi "
         "tindakan berdasarkan data yang tersedia.\n\n"
-        "PENTING — cara membaca data stockout:\n"
-        "- Data mencakup 3 tahun historis (2021, 2022, 2023).\n"
-        "- 'total_stockout_days' adalah jumlah hari stock out di SELURUH PERIODE, "
-        "bukan dalam satu bulan. Contoh: 45 hari di Januari = rata-rata 15 hari/tahun "
-        "selama 3 tahun (Januari 2021 + 2022 + 2023).\n"
-        "- 'risk_score' berasal dari prediksi model LightGBM, bukan perhitungan manual.\n"
-        "- Selalu jelaskan konteks tahun saat menjawab pertanyaan tentang frekuensi stockout.\n\n"
-        "Gunakan bahasa Indonesia yang jelas dan ringkas. Jika relevan, "
-        "gunakan bullet point atau tabel markdown agar mudah dibaca. "
-        "Jawab HANYA berdasarkan data yang diberikan di bawah ini — jangan mengarang.\n\n"
+
+        "ATURAN WAJIB — cara membaca dan menyajikan data:\n"
+        "1. 'risk_score' adalah skor relatif berbasis persentil dari model LightGBM. "
+        "Nilai numeriknya TIDAK bermakna secara absolut — nilai kecil pun bisa berarti "
+        "'Tinggi' jika masuk persentil atas dataset. "
+        "JANGAN PERNAH tampilkan nilai numerik risk_score dalam jawaban. "
+        "Cukup tampilkan risk_level: Tinggi / Menengah / Rendah.\n"
+        "2. Untuk breakdown stockout per tahun, gunakan kolom 'Stockout per SKU per Tahun' "
+        "yang tersedia di konteks. JANGAN menjumlahkan data bulanan secara manual — "
+        "hasilnya tidak akurat karena data bulanan hanya berisi Top 5 SKU per bulan.\n"
+        "3. 'total_stockout_days' adalah total hari stockout di SELURUH PERIODE (semua tahun).\n"
+        "4. Data mencakup 3 tahun historis (2021, 2022, 2023).\n"
+        "5. Saat menjawab pertanyaan tentang SKU spesifik, gunakan format:\n"
+        "   a) Ringkasan SKU: Level Risiko keseluruhan, Total Hari Stockout (3 tahun), "
+        "breakdown per tahun dalam tabel.\n"
+        "   b) Detail per Toko: buat tabel yang menampilkan SEMUA toko untuk SKU tersebut "
+        "dari data 'Detail SKU per Toko', dengan kolom: "
+        "Toko | Level Risiko | Stok Saat Ini | Penjualan 7 Hari Terakhir | "
+        "Stockout 2021 | Stockout 2022 | Stockout 2023. "
+        "Ambil data stockout per toko per tahun dari 'Stockout per SKU per Toko per Tahun'.\n"
+        "   c) Rekomendasi: sebutkan toko mana yang paling mendesak dan tindakan spesifik.\n"
+        "6. Saat menjawab pertanyaan tentang KATEGORI, gunakan tabel "
+        "'Jumlah SKU per Kategori berdasarkan Risk Level' dan "
+        "'Total Hari Stockout per Kategori' dari konteks. "
+        "Tampilkan: jumlah SKU High/Medium/Low, total hari stockout, persentase hari stockout, "
+        "lalu SKU mana dalam kategori itu yang paling berisiko. "
+        "JANGAN gunakan angka dari ringkasan keseluruhan dashboard untuk mewakili satu kategori.\n"
+        "7. JANGAN tampilkan rumus atau rantai penjumlahan seperti '12 + 11 + ... = 151'.\n\n"
+
+        "Gunakan bahasa Indonesia yang jelas dan ringkas. Gunakan tabel markdown untuk "
+        "data numerik. Jawab HANYA berdasarkan data yang diberikan di bawah ini.\n\n"
         + context
     )
 
