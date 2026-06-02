@@ -13,6 +13,47 @@ from utils.helpers import (
 )
 
 
+def _df_fingerprint(df: pd.DataFrame) -> tuple:
+    """Fast fingerprint for DataFrame cache keying — avoids full-hash of large DataFrames."""
+    store_sample = (
+        tuple(sorted(str(x) for x in df["store_id"].unique())[:8])
+        if "store_id" in df.columns else ()
+    )
+    cat_sample = (
+        tuple(sorted(str(x) for x in df["category"].unique()))
+        if "category" in df.columns else ()
+    )
+    return (
+        len(df),
+        str(df["date"].min()) if "date" in df.columns else "",
+        str(df["date"].max()) if "date" in df.columns else "",
+        df["sku_id"].nunique() if "sku_id" in df.columns else 0,
+        store_sample,
+        cat_sample,
+    )
+
+
+@st.cache_data(
+    show_spinner=False,
+    hash_funcs={pd.DataFrame: _df_fingerprint},
+)
+def compute_batch_prediction(filtered_df: pd.DataFrame, _model) -> pd.DataFrame:
+    """
+    Heavy computation: feature engineering + ML inference.
+    Cached so chat interactions do not retrigger the ML pipeline.
+    """
+    X_full, df_fe_full = run_feature_engineering(filtered_df)
+    df_fe_full["risk_score"] = _model.predict_proba(X_full)[:, 1]
+    df_fe_full["date"] = pd.to_datetime(df_fe_full["date"])
+    latest_df = (
+        df_fe_full.sort_values("date")
+        .groupby(["sku_id", "store_id"], as_index=False, observed=True)
+        .last()
+        .reset_index(drop=True)
+    )
+    return latest_df
+
+
 def render_overview(filtered_df: pd.DataFrame, model) -> pd.DataFrame:
     """
     Run batch prediction on the latest record per SKU-Store combination
@@ -22,28 +63,17 @@ def render_overview(filtered_df: pd.DataFrame, model) -> pd.DataFrame:
     -------
     latest_df : pd.DataFrame with risk_score, risk_level, and FE columns
     """
-    with st.spinner("Running batch risk analysis..."):
-        n_sku_est = filtered_df.groupby(["sku_id", "store_id"], observed=True).ngroups
-        if n_sku_est > 5000:
-            st.warning(
-                f"Large batch: ~{n_sku_est:,} SKU-Store pairs. "
-                "Consider narrowing filters for faster results."
-            )
-
-        # 1. Run FE on full filtered history (rolling features need history)
-        X_full, df_fe_full = run_feature_engineering(filtered_df)
-        df_fe_full["risk_score"] = model.predict_proba(X_full)[:, 1]
-
-        # 2. Keep only latest date per (sku_id, store_id)
-        df_fe_full["date"] = pd.to_datetime(df_fe_full["date"])
-        latest_df = (
-            df_fe_full.sort_values("date")
-            .groupby(["sku_id", "store_id"], as_index=False, observed=True)
-            .last()
-            .reset_index(drop=True)
+    n_sku_est = filtered_df.groupby(["sku_id", "store_id"], observed=True).ngroups
+    if n_sku_est > 5000:
+        st.warning(
+            f"Large batch: ~{n_sku_est:,} SKU-Store pairs. "
+            "Consider narrowing filters for faster results."
         )
 
-        # 3. Compute dynamic thresholds from score distribution
+    with st.spinner("Running batch risk analysis..."):
+        latest_df = compute_batch_prediction(filtered_df, model)
+
+        # Compute dynamic thresholds from score distribution
         medium_thresh, high_thresh = compute_risk_thresholds(latest_df["risk_score"])
         st.session_state["medium_thresh"] = medium_thresh
         st.session_state["high_thresh"]   = high_thresh

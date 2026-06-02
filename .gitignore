@@ -2,3 +2,19 @@ implementation_plan.txt
 proses.txt
 
 .env
+
+*.tmp.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environment
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db

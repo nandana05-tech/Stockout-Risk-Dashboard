@@ -10,59 +10,59 @@ import joblib
 @st.cache_data
 def load_data() -> pd.DataFrame:
     """
-    Load CSV in chunks to avoid peak-RAM spike during pandas tokenization.
-    Each 100k-row chunk is cast to compact dtypes before accumulation.
-    Final memory footprint: ~200 MB instead of ~1 GB.
+    Load dataset from Parquet (fast). Falls back to CSV on first run,
+    then saves Parquet so subsequent loads are instant.
     """
+    import os
+
+    parquet_path = "data/fmcg_sales_3years_1M_rows.parquet"
+    csv_path = "data/fmcg_sales_3years_1M_rows.csv"
+
+    if os.path.exists(parquet_path):
+        try:
+            return pd.read_parquet(parquet_path, engine="pyarrow")
+        except Exception:
+            # File korup (misal write terputus) — hapus dan fallback ke CSV
+            try:
+                os.remove(parquet_path)
+            except Exception:
+                pass
+
+    # First-run fallback: read CSV, save as Parquet for next time
     dtype_map = {
-        "year":        "int16",
-        "month":       "int8",
-        "day":         "int8",
-        "weekofyear":  "int8",
-        "weekday":     "int8",
-        "is_weekend":  "int8",
-        "is_holiday":  "int8",
-        "promo_flag":  "int8",
-        "stock_out_flag": "int8",
-        "temperature": "float32",
-        "rain_mm":     "float32",
-        "latitude":    "float32",
-        "longitude":   "float32",
-        "list_price":  "float32",
-        "discount_pct":"float32",
-        "gross_sales": "float32",
-        "net_sales":   "float32",
-        "purchase_cost":"float32",
-        "margin_pct":  "float32",
-        "units_sold":  "int32",
-        "stock_on_hand":"int32",
-        "lead_time_days":"int16",
+        "year": "int16", "month": "int8", "day": "int8",
+        "weekofyear": "int8", "weekday": "int8", "is_weekend": "int8",
+        "is_holiday": "int8", "promo_flag": "int8", "stock_out_flag": "int8",
+        "temperature": "float32", "rain_mm": "float32",
+        "latitude": "float32", "longitude": "float32",
+        "list_price": "float32", "discount_pct": "float32",
+        "gross_sales": "float32", "net_sales": "float32",
+        "purchase_cost": "float32", "margin_pct": "float32",
+        "units_sold": "int32", "stock_on_hand": "int32",
+        "lead_time_days": "int16",
     }
-    # String columns are read as object per-chunk, then converted after concat
     str_cols = [
         "store_id", "country", "city", "channel",
-        "sku_id", "sku_name", "category", "subcategory",
-        "brand", "supplier_id",
+        "sku_id", "sku_name", "category", "subcategory", "brand", "supplier_id",
     ]
 
     chunks = []
     reader = pd.read_csv(
-        "data/fmcg_sales_3years_1M_rows.csv",
-        parse_dates=["date"],
-        dtype=dtype_map,
-        chunksize=100_000,   # process 100k rows at a time
-        low_memory=False,
+        csv_path, parse_dates=["date"], dtype=dtype_map,
+        chunksize=100_000, low_memory=False,
     )
     for chunk in reader:
         chunks.append(chunk)
 
     df = pd.concat(chunks, ignore_index=True)
-
-    # Convert string columns to category after concat (memory efficient)
     for col in str_cols:
         if col in df.columns:
             df[col] = df[col].astype("category")
 
+    try:
+        df.to_parquet(parquet_path, index=False, engine="pyarrow", compression="snappy")
+    except Exception:
+        pass  # non-fatal: next run will retry conversion
     return df
 
 

@@ -6,6 +6,7 @@ from components.overview import render_overview
 from components.prediction import render_prediction
 from components.visualization import render_stock_chart, render_risk_timeline
 from components.action_table import render_action_table
+from components.chatbot import render_chatbot
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -39,33 +40,38 @@ st.caption(
 st.divider()
 
 # ---------------------------------------------------------------------------
-# Section 1: Overview KPIs (always shown)
+# Tabs: Dashboard | AI Assistant
 # ---------------------------------------------------------------------------
-latest_df = render_overview(filtered_df, model)
+tab_dashboard, tab_ai = st.tabs(["Dashboard", "AI Assistant"])
 
-st.divider()
+# AI Assistant dirender duluan — tidak bergantung pada komputasi Dashboard
+# sehingga form API key muncul segera tanpa menunggu ML pipeline selesai.
+with tab_ai:
+    render_chatbot(filtered_df, model)
 
-# ---------------------------------------------------------------------------
-# Section 2: Action Table (always shown)
-# ---------------------------------------------------------------------------
-render_action_table(latest_df)
+with tab_dashboard:
+    # Section 1: Overview KPIs
+    latest_df = render_overview(filtered_df, model)
 
-st.divider()
+    st.divider()
 
-# ---------------------------------------------------------------------------
-# Section 3: Single SKU Deep Dive (only in Single SKU mode)
-# ---------------------------------------------------------------------------
-if selected_sku:
-    st.header(f"Deep Dive: {selected_sku}")
+    # Section 2: Action Table
+    render_action_table(latest_df)
 
-    render_prediction(filtered_df, model, selected_sku)
+    st.divider()
 
-    if st.session_state.get("analyzed") and \
-       st.session_state.get("analyzed_sku") == selected_sku:
-        sku_df = st.session_state["sku_df"]
+    # Section 3: Single SKU Deep Dive
+    if selected_sku:
+        st.header(f"Deep Dive: {selected_sku}")
 
-        col_left, col_right = st.columns(2)
-        with col_left:
-            render_stock_chart(sku_df)
-        with col_right:
-            render_risk_timeline(sku_df, model)
+        render_prediction(filtered_df, model, selected_sku)
+
+        if st.session_state.get("analyzed") and \
+           st.session_state.get("analyzed_sku") == selected_sku:
+            sku_df = st.session_state["sku_df"]
+
+            col_left, col_right = st.columns(2)
+            with col_left:
+                render_stock_chart(sku_df)
+            with col_right:
+                render_risk_timeline(sku_df, model)
